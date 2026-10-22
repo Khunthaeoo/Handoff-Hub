@@ -6,6 +6,8 @@
   <title>Handoff Hub | CSIE Project Handoff Management</title>
   <!-- JSZip for client-side Handoff ZIP packaging (with graceful offline fallback) -->
   <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
+  <!-- Supabase JavaScript client for account authentication -->
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
   <style>
     /* -------------------------------------------------------------
        CSS Design System & Variables (Lavender, Cream, Mint, Blue)
@@ -1345,9 +1347,71 @@
         width: 100%;
       }
     }
+
+    /* Supabase authentication screen */
+    body:not(.authenticated) #app-container,
+    body:not(.authenticated) .mobile-header { display: none !important; }
+    body.authenticated #auth-screen { display: none !important; }
+    #auth-screen {
+      min-height: 100vh; display: flex; align-items: center; justify-content: center;
+      padding: 24px; background: radial-gradient(circle at top left, #EDE9FE 0, transparent 38%),
+      radial-gradient(circle at bottom right, #D1FAE5 0, transparent 35%), var(--bg-cream);
+    }
+    .auth-card {
+      width: 100%; max-width: 440px; background: #fff; border: 1px solid var(--surface-border);
+      border-radius: 24px; padding: 32px; box-shadow: 0 24px 70px rgba(45, 35, 75, .12);
+    }
+    .auth-brand { display:flex; align-items:center; gap:12px; margin-bottom:22px; }
+    .auth-brand-icon { width:46px; height:46px; border-radius:14px; display:grid; place-items:center;
+      color:#fff; background:linear-gradient(135deg,#8B5CF6,#6D28D9); font-size:22px; font-weight:800; }
+    .auth-card h1 { margin:0; color:var(--text-main); font-size:1.55rem; }
+    .auth-subtitle { margin:7px 0 22px; color:var(--text-muted); line-height:1.55; font-size:.92rem; }
+    .auth-field { margin-bottom:15px; }
+    .auth-field label { display:block; margin-bottom:7px; color:var(--text-main); font-size:.86rem; font-weight:650; }
+    .auth-field input { width:100%; padding:12px 13px; border:1px solid var(--surface-border); border-radius:11px;
+      background:#fff; color:var(--text-main); font:inherit; outline:none; box-sizing:border-box; }
+    .auth-field input:focus { border-color:#8B5CF6; box-shadow:0 0 0 3px rgba(139,92,246,.13); }
+    .auth-submit { width:100%; justify-content:center; margin-top:5px; }
+    .auth-switch { text-align:center; color:var(--text-muted); font-size:.88rem; margin:18px 0 0; }
+    .auth-switch button { border:0; background:none; color:var(--lavender-600); font:inherit; font-weight:700; cursor:pointer; }
+    .auth-message { display:none; margin:14px 0 0; padding:11px 12px; border-radius:10px; font-size:.86rem; line-height:1.45; }
+    .auth-message.visible { display:block; }
+    .auth-message.error { background:#FFF1F2; color:#BE123C; border:1px solid #FECDD3; }
+    .auth-message.success { background:#ECFDF5; color:#047857; border:1px solid #A7F3D0; }
+    .auth-config-note { margin-top:18px; padding:12px; border-radius:10px; background:#FFFBEB; color:#92400E; font-size:.8rem; line-height:1.5; }
+    .auth-account-box { padding:12px; margin-top:16px; border:1px solid var(--surface-border); border-radius:12px; }
+    .auth-account-email { font-size:.78rem; color:var(--text-muted); overflow-wrap:anywhere; margin-bottom:9px; }
+    .auth-logout { width:100%; justify-content:center; }
+    @media (max-width: 520px) { .auth-card { padding:24px 20px; } #auth-screen { padding:16px; } }
   </style>
 </head>
 <body>
+
+  <!-- Account screen: Supabase Auth -->
+  <section id="auth-screen" aria-labelledby="auth-title">
+    <div class="auth-card">
+      <div class="auth-brand">
+        <div class="auth-brand-icon">H</div>
+        <div><h1>Handoff Hub</h1><div style="color:var(--text-muted);font-size:.82rem;margin-top:3px;">Project handoff workspace</div></div>
+      </div>
+      <h2 id="auth-title" style="font-size:1.2rem;margin:0;">Welcome back</h2>
+      <p class="auth-subtitle" id="auth-subtitle">Log in to continue to your Handoff Hub workspace.</p>
+      <form id="auth-form">
+        <div class="auth-field">
+          <label for="auth-email">Email address</label>
+          <input id="auth-email" type="email" autocomplete="email" required placeholder="you@example.com" />
+        </div>
+        <div class="auth-field">
+          <label for="auth-password">Password</label>
+          <input id="auth-password" type="password" autocomplete="current-password" minlength="8" required placeholder="At least 8 characters" />
+        </div>
+        <button class="btn btn-primary auth-submit" id="auth-submit" type="submit">Log in</button>
+      </form>
+      <div id="auth-message" class="auth-message" role="status" aria-live="polite"></div>
+      <p class="auth-switch"><span id="auth-switch-text">New to Handoff Hub?</span> <button id="auth-switch-button" type="button">Create an account</button></p>
+      <div id="auth-config-note" class="auth-config-note">Setup required: add your Supabase Project URL and publishable/anon key in the configuration near the top of the JavaScript section. Never use a service_role key in this public file.</div>
+    </div>
+  </section>
 
   <!-- Mobile Header -->
   <header class="mobile-header">
@@ -1394,6 +1458,11 @@
       </nav>
 
       <div class="sidebar-footer">
+        <div class="auth-account-box">
+          <div style="font-size:.76rem;font-weight:700;margin-bottom:5px;">Signed in as</div>
+          <div id="auth-user-email" class="auth-account-email">Your account</div>
+          <button class="btn btn-secondary auth-logout" id="auth-logout" type="button">Log out</button>
+        </div>
         <button class="quick-create-btn" onclick="openCreateProjectModal()">
           <svg width="18" height="18" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5" d="M12 4v16m8-8H4"></path></svg>
           Create Project
@@ -1730,7 +1799,7 @@
     /* -------------------------------------------------------------
        IndexedDB Storage Engine for File Binary Blobs
        ------------------------------------------------------------- */
-    const DB_NAME = 'HandoffHub_FileStore_v1';
+    let DB_NAME = 'HandoffHub_FileStore_v1';
     const DB_VERSION = 1;
     const STORE_FILES = 'deliverable_blobs';
 
@@ -1870,7 +1939,7 @@
     /* -------------------------------------------------------------
        Data Structures & CSIE Seed Data
        ------------------------------------------------------------- */
-    const STORAGE_KEY = 'handoff_hub_projects_v2';
+    let STORAGE_KEY = 'handoff_hub_projects_v2';
     const MAX_FILE_SIZE_BYTES = 25 * 1024 * 1024; // 25 MB Limit
     const ALLOWED_EXTENSIONS = [
       'pdf', 'txt', 'png', 'jpg', 'jpeg', 'zip', 'html', 'htm',
@@ -1979,6 +2048,143 @@
     let selectedStatusFilter = 'ALL';
     let searchQuery = '';
     let activeConfirmResolve = null;
+
+    /* -------------------------------------------------------------
+       Supabase Authentication
+       1) Create a Supabase project.
+       2) Replace the two placeholders below with Project URL and publishable/anon key.
+       3) Add https://YOUR_GITHUB_USERNAME.github.io/Handoff-Hub/ to Supabase Auth URL settings.
+       Never put a service_role key in this browser-side file.
+       ------------------------------------------------------------- */
+    const SUPABASE_URL = 'https://jfkesljpoxdexgzffkej.supabase.co';
+    const SUPABASE_ANON_KEY = 'sb_publishable_0PTEhFTVoKVx-QEu60T9sQ_KPqUi6uv';
+    let supabaseClient = null;
+    let currentAuthUser = null;
+    let appInitialized = false;
+    let authMode = 'login';
+
+    function setAuthMessage(message, type = 'error') {
+      const el = document.getElementById('auth-message');
+      el.textContent = message;
+      el.className = `auth-message visible ${type}`;
+    }
+
+    function clearAuthMessage() {
+      const el = document.getElementById('auth-message');
+      el.textContent = '';
+      el.className = 'auth-message';
+    }
+
+    function setAuthMode(mode) {
+      authMode = mode;
+      clearAuthMessage();
+      const isSignup = mode === 'signup';
+      document.getElementById('auth-title').textContent = isSignup ? 'Create your account' : 'Welcome back';
+      document.getElementById('auth-subtitle').textContent = isSignup
+        ? 'Create an account to open your Handoff Hub workspace.'
+        : 'Log in to continue to your Handoff Hub workspace.';
+      document.getElementById('auth-submit').textContent = isSignup ? 'Create account' : 'Log in';
+      document.getElementById('auth-switch-text').textContent = isSignup ? 'Already have an account?' : 'New to Handoff Hub?';
+      document.getElementById('auth-switch-button').textContent = isSignup ? 'Log in' : 'Create an account';
+      document.getElementById('auth-password').autocomplete = isSignup ? 'new-password' : 'current-password';
+    }
+
+    async function initializeSupabaseAuth() {
+      document.getElementById('auth-switch-button').addEventListener('click', () => {
+        setAuthMode(authMode === 'login' ? 'signup' : 'login');
+      });
+      document.getElementById('auth-form').addEventListener('submit', handleAuthSubmit);
+      document.getElementById('auth-logout').addEventListener('click', handleLogout);
+
+      if (!window.supabase || SUPABASE_URL.includes('YOUR_SUPABASE') || SUPABASE_ANON_KEY.includes('YOUR_SUPABASE')) {
+        setAuthMessage('Supabase is not configured yet. Add your Supabase Project URL and publishable/anon key in the JavaScript configuration, then reload this page.', 'error');
+        document.getElementById('auth-config-note').style.display = 'block';
+        return;
+      }
+
+      document.getElementById('auth-config-note').style.display = 'none';
+      supabaseClient = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+      const { data, error } = await supabaseClient.auth.getSession();
+      if (error) setAuthMessage('Could not check your login session: ' + error.message, 'error');
+      await syncAuthSession(data?.session || null);
+      supabaseClient.auth.onAuthStateChange((_event, session) => {
+        // Defer work out of the Supabase callback to avoid blocking auth state changes.
+        setTimeout(() => { syncAuthSession(session); }, 0);
+      });
+    }
+
+    async function handleAuthSubmit(event) {
+      event.preventDefault();
+      clearAuthMessage();
+      if (!supabaseClient) {
+        setAuthMessage('Supabase is not configured. Add your project URL and publishable/anon key first.');
+        return;
+      }
+      const email = document.getElementById('auth-email').value.trim();
+      const password = document.getElementById('auth-password').value;
+      const submitButton = document.getElementById('auth-submit');
+      submitButton.disabled = true;
+      submitButton.textContent = authMode === 'signup' ? 'Creating account…' : 'Logging in…';
+      try {
+        if (authMode === 'signup') {
+          const { data, error } = await supabaseClient.auth.signUp({
+            email,
+            password,
+            options: { emailRedirectTo: window.location.href.split('#')[0] }
+          });
+          if (error) throw error;
+          if (data.session) {
+            setAuthMessage('Account created successfully. You are now logged in.', 'success');
+          } else {
+            setAuthMode('login');
+            setAuthMessage('Account created. Please check your email and click the verification link before logging in.', 'success');
+          }
+        } else {
+          const { error } = await supabaseClient.auth.signInWithPassword({ email, password });
+          if (error) throw error;
+          setAuthMessage('Login successful.', 'success');
+        }
+      } catch (error) {
+        setAuthMessage(error?.message || 'Authentication failed. Please try again.', 'error');
+      } finally {
+        submitButton.disabled = false;
+        submitButton.textContent = authMode === 'signup' ? 'Create account' : 'Log in';
+      }
+    }
+
+    async function handleLogout() {
+      if (!supabaseClient) return;
+      const { error } = await supabaseClient.auth.signOut();
+      if (error) showToast('Could not log out: ' + error.message, 'error');
+    }
+
+    async function syncAuthSession(session) {
+      const user = session?.user || null;
+      if (!user) {
+        currentAuthUser = null;
+        document.body.classList.remove('authenticated');
+        projects = [];
+        return;
+      }
+      if (currentAuthUser?.id === user.id && document.body.classList.contains('authenticated')) return;
+
+      currentAuthUser = user;
+      // Keep this current prototype's browser-local project data separate per signed-in account.
+      // This does NOT sync project data to Supabase or make it available on other devices.
+      STORAGE_KEY = 'handoff_hub_projects_v2_' + user.id;
+      DB_NAME = 'HandoffHub_FileStore_v1_' + user.id;
+      dbPromise = null;
+      document.getElementById('auth-user-email').textContent = user.email || 'Signed-in user';
+      document.body.classList.add('authenticated');
+      if (!appInitialized) {
+        appInitialized = true;
+        await initApp();
+      } else {
+        loadProjectsFromStorage();
+        await seedSampleFilesIfNeeded();
+        showView('dashboard');
+      }
+    }
 
     /* -------------------------------------------------------------
        App Bootstrap & Seeding
@@ -3486,7 +3692,7 @@
     /* -------------------------------------------------------------
        Start Application
        ------------------------------------------------------------- */
-    document.addEventListener('DOMContentLoaded', initApp);
+    document.addEventListener('DOMContentLoaded', initializeSupabaseAuth);
   </script>
 </body>
 </html>
