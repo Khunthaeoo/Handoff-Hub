@@ -825,6 +825,102 @@
       color: var(--rose-600);
     }
 
+    /* =====================================
+   HANDOFF HUB - LOGIN PAGE CENTER FIX
+===================================== */
+
+#auth-screen {
+    position: fixed;
+    inset: 0;
+
+    width: 100%;
+    height: 100vh;
+    height: 100dvh;
+
+    display: flex;
+    align-items: center;
+    justify-content: center;
+
+    padding: 20px;
+    box-sizing: border-box;
+    overflow-y: auto;
+
+    background:
+        radial-gradient(circle at top left, #ede9fe, transparent 40%),
+        radial-gradient(circle at bottom right, #d1fae5, transparent 40%),
+        #f8f7fc;
+
+    z-index: 9999;
+}
+
+.auth-card {
+    width: 100%;
+    max-width: 440px;
+
+    margin: auto;
+    padding: 32px;
+
+    box-sizing: border-box;
+
+    background: white;
+    border-radius: 24px;
+
+    box-shadow: 0 20px 60px rgba(0, 0, 0, 0.10);
+}
+
+/* Mobile responsive */
+@media (max-width: 480px) {
+    #auth-screen {
+        padding: 16px;
+    }
+
+    .auth-card {
+        padding: 24px 20px;
+        border-radius: 20px;
+    }
+}
+
+/* Guest button */
+.auth-guest-btn {
+    width: 100%;
+    margin-top: 12px;
+    padding: 12px;
+
+    border: 1px solid #ddd6fe;
+    border-radius: 12px;
+
+    background: #f5f3ff;
+    color: #6d28d9;
+
+    font-size: 14px;
+    font-weight: 600;
+
+    cursor: pointer;
+    transition: 0.2s;
+}
+
+.auth-guest-btn:hover {
+    background: #ede9fe;
+    transform: translateY(-1px);
+}
+
+.auth-divider {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+
+    margin: 20px 0 8px;
+    color: #9ca3af;
+    font-size: 13px;
+}
+
+.auth-divider::before,
+.auth-divider::after {
+    content: "";
+    flex: 1;
+    height: 1px;
+    background: #e5e7eb;
+}
     /* Deliverable Attachments & File Upload UI */
     .drop-zone {
       border: 2px dashed var(--lavender-200);
@@ -1408,6 +1504,29 @@
         <button class="btn btn-primary auth-submit" id="auth-submit" type="submit">Log in</button>
       </form>
       <div id="auth-message" class="auth-message" role="status" aria-live="polite"></div>
+      <!-- Guest Access -->
+<div class="auth-divider">
+    <span>OR</span>
+</div>
+
+<button
+    type="button"
+    class="auth-guest-btn"
+    id="guest-login-btn"
+    onclick="handleGuestLogin()"
+>
+    👤 Continue as Guest
+</button>
+
+<p style="
+    text-align: center;
+    font-size: 12px;
+    color: #9ca3af;
+    margin-top: 10px;
+">
+    Explore Handoff Hub without creating an account.
+    Guest data is saved only in this browser.
+</p>
       <p class="auth-switch"><span id="auth-switch-text">New to Handoff Hub?</span> <button id="auth-switch-button" type="button">Create an account</button></p>
       <div id="auth-config-note" class="auth-config-note">Setup required: add your Supabase Project URL and publishable/anon key in the configuration near the top of the JavaScript section. Never use a service_role key in this public file.</div>
     </div>
@@ -2153,12 +2272,102 @@
     }
 
     async function handleLogout() {
-      if (!supabaseClient) return;
-      const { error } = await supabaseClient.auth.signOut();
-      if (error) showToast('Could not log out: ' + error.message, 'error');
+      // Guest logout
+    if (currentAuthUser?.id === 'guest') {
+
+        currentAuthUser = null;
+
+        projects = [];
+
+        document.body.classList.remove('authenticated');
+
+        setAuthMode('login');
+
+        return;
     }
 
+    // Supabase logout
+    if (!supabaseClient) return;
+
+    const { error } = await supabaseClient.auth.signOut();
+
+    if (error) {
+        showToast(
+            'Could not log out: ' + error.message,
+            'error'
+        );
+    }
+}
+// =====================================
+// GUEST LOGIN
+// =====================================
+
+async function handleGuestLogin() {
+    // Guest users do not need a Supabase account.
+    // If a real Supabase user is already signed in,
+    // do not mix that account with guest mode.
+    if (supabaseClient) {
+        const { data, error } =
+            await supabaseClient.auth.getSession();
+
+        if (error) {
+            setAuthMessage(error.message, 'error');
+            return;
+        }
+
+        if (data.session) {
+            setAuthMessage(
+                'Please log out of your account before using Guest Mode.',
+                'error'
+            );
+            return;
+        }
+    }
+
+    currentAuthUser = {
+        id: 'guest',
+        email: 'Guest Account'
+    };
+
+    // Separate guest projects from registered users.
+    STORAGE_KEY = 'handoff_hub_projects_v2_guest';
+
+    // Separate guest uploaded files.
+    DB_NAME = 'HandoffHub_FileStore_v1_guest';
+
+    // Reset the IndexedDB connection.
+    dbPromise = null;
+
+    // Update account label.
+    document.getElementById('auth-user-email').textContent =
+        'Guest Account';
+
+    // Show dashboard.
+    document.body.classList.add('authenticated');
+
+    // Initialize application.
+    if (!appInitialized) {
+
+        appInitialized = true;
+
+        await initApp();
+
+    } else {
+
+        loadProjectsFromStorage();
+
+        await seedSampleFilesIfNeeded();
+
+        showView('dashboard');
+    }
+}
+    
     async function syncAuthSession(session) {
+      // Keep guest mode active when Supabase reports
+    // that no registered user is signed in.
+    if (currentAuthUser?.id === 'guest' && !session?.user) {
+        return;
+    }
       const user = session?.user || null;
       if (!user) {
         currentAuthUser = null;
