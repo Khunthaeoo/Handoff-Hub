@@ -2212,7 +2212,8 @@
 
     async function refreshCloudProjects() {
       if (!isCloudUser()) return;
-      // Do not discard unsaved edits if an earlier request failed.
+      // Flush pending debounced edits before refreshing, so cloud reads cannot overwrite uploads.
+      if (cloudTimer) { clearTimeout(cloudTimer); cloudTimer = null; await persistCloudChanges(); }
       await cloudWriteChain;
       const incoming = await loadProjectsFromCloud();
       projects = incoming;
@@ -2250,7 +2251,7 @@
     function scheduleCloudSave() {
       if (!cloudReady) return;
       clearTimeout(cloudTimer);
-      cloudTimer = setTimeout(() => { persistCloudChanges().catch(console.error); }, 250);
+      cloudTimer = setTimeout(() => { cloudTimer = null; persistCloudChanges().catch(console.error); }, 250);
     }
 
     async function cloudUploadBlob(fileRecord) {
@@ -3335,6 +3336,17 @@ async function handleGuestLogin() {
       if (addedCount > 0) {
         p.updatedAt = new Date().toISOString();
         saveProjectsToStorage();
+        if (isCloudUser()) {
+          clearTimeout(cloudTimer);
+          cloudTimer = null;
+          try {
+            await persistCloudChanges();
+          } catch (syncErr) {
+            showToast('File uploaded, but project attachment list was NOT saved: ' + syncErr.message, 'error');
+            renderProjectDetailView(p.id);
+            return;
+          }
+        }
         showToast(`Successfully stored ${addedCount} deliverable file${addedCount > 1 ? 's' : ''}!`, 'success');
         renderProjectDetailView(p.id);
       }
