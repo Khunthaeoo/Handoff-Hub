@@ -2188,6 +2188,8 @@
     let cloudWriteChain = Promise.resolve();
     let cloudSnapshot = new Map();
     let cloudTimer = null;
+    let activeUploads = 0;
+    let localMutationEpoch = 0;
     const isCloudUser = () => !!(supabaseClient && currentAuthUser && currentAuthUser.id !== 'guest');
 
     function queueCloudWrite(task) {
@@ -2215,7 +2217,12 @@
       // Flush pending debounced edits before refreshing, so cloud reads cannot overwrite uploads.
       if (cloudTimer) { clearTimeout(cloudTimer); cloudTimer = null; await persistCloudChanges(); }
       await cloudWriteChain;
+      if (activeUploads) return;
+      const epochBeforeFetch = localMutationEpoch;
       const incoming = await loadProjectsFromCloud();
+      // A file chooser or upload can resume while the network request is in flight.
+      // Never replace in-memory edits with an older cloud response.
+      if (activeUploads || epochBeforeFetch !== localMutationEpoch) return;
       projects = incoming;
       cloudSnapshot = new Map(incoming.map(p => [p.id, JSON.stringify(p)]));
       showView(currentView === 'project-detail' && projects.some(p => p.id === activeProjectId)
@@ -2249,6 +2256,7 @@
     }
 
     function scheduleCloudSave() {
+      localMutationEpoch++;
       if (!cloudReady) return;
       clearTimeout(cloudTimer);
       cloudTimer = setTimeout(() => { cloudTimer = null; persistCloudChanges().catch(console.error); }, 250);
@@ -2545,7 +2553,7 @@ async function handleGuestLogin() {
       }
       setupEventListeners();
       window.addEventListener('focus', () => {
-        if (isCloudUser() && cloudReady) refreshCloudProjects().catch(err => console.warn('Refresh skipped:', err));
+        if (isCloudUser() && cloudReady && !activeUploads) refreshCloudProjects().catch(err => console.warn('Refresh skipped:', err));
       });
       showView('dashboard');
     }
@@ -3249,6 +3257,9 @@ async function handleGuestLogin() {
     }
 
     async function processUploadedFiles(fileList, projectId) {
+      activeUploads++;
+      localMutationEpoch++;
+      try {
       const p = projects.find(item => item.id === projectId);
       if (!p) return;
       if (!Array.isArray(p.files)) p.files = [];
@@ -3349,6 +3360,9 @@ async function handleGuestLogin() {
         }
         showToast(`Successfully stored ${addedCount} deliverable file${addedCount > 1 ? 's' : ''}!`, 'success');
         renderProjectDetailView(p.id);
+      }
+      } finally {
+        activeUploads--;
       }
     }
 
