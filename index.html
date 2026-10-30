@@ -2182,6 +2182,137 @@
     let appInitialized = false;
     let authMode = 'login';
 
+    // Cloud data is the source of truth for signed-in users. Guests stay local.
+    const CLOUD_BUCKET = 'project-files';
+    let cloudReady = false;
+    let cloudWriteChain = Promise.resolve();
+    let cloudSnapshot = new Map();
+    let cloudTimer = null;
+    const isCloudUser = () => !!(supabaseClient && currentAuthUser && currentAuthUser.id !== 'guest');
+
+    function queueCloudWrite(task) {
+      cloudWriteChain = cloudWriteChain.catch(() => {}).then(async () => {
+        if (!isCloudUser() || !cloudReady) return;
+        try { await task(); }
+        catch (err) {
+          console.error('Supabase sync error:', err);
+          showToast('Cloud sync failed: ' + err.message + '. Keep this tab open and retry.', 'error');
+          throw err;
+        }
+      });
+      return cloudWriteChain;
+    }
+
+    async function loadProjectsFromCloud() {
+      const { data, error } = await supabaseClient.from('projects')
+        .select('id,project_data').eq('user_id', currentAuthUser.id);
+      if (error) throw error;
+      return (data || []).map(row => ({ ...row.project_data, id: row.id }));
+    }
+
+    async function refreshCloudProjects() {
+      if (!isCloudUser()) return;
+      // Do not discard unsaved edits if an earlier request failed.
+      await cloudWriteChain;
+      const incoming = await loadProjectsFromCloud();
+      projects = incoming;
+      cloudSnapshot = new Map(incoming.map(p => [p.id, JSON.stringify(p)]));
+      showView(currentView === 'project-detail' && projects.some(p => p.id === activeProjectId)
+        ? 'project-detail' : 'dashboard', activeProjectId);
+    }
+
+    async function persistCloudChanges() {
+      if (!isCloudUser() || !cloudReady) return;
+      const userId = currentAuthUser.id;
+      const current = new Map(projects.map(p => [p.id, JSON.stringify(p)]));
+      const changed = projects.filter(p => cloudSnapshot.get(p.id) !== current.get(p.id));
+      const deleted = [...cloudSnapshot.keys()].filter(id => !current.has(id));
+      if (!changed.length && !deleted.length) return;
+      await queueCloudWrite(async () => {
+        if (currentAuthUser?.id !== userId) throw new Error('Account changed during sync');
+        for (const p of changed) {
+          const { error } = await supabaseClient.from('projects').upsert({
+            id: p.id, user_id: userId, project_data: p,
+            updated_at: new Date().toISOString()
+          }, { onConflict: 'id' });
+          if (error) throw error;
+          cloudSnapshot.set(p.id, JSON.stringify(p));
+        }
+        for (const id of deleted) {
+          const { error } = await supabaseClient.from('projects')
+            .delete().eq('id', id).eq('user_id', userId);
+          if (error) throw error;
+          cloudSnapshot.delete(id);
+        }
+      });
+    }
+
+    function scheduleCloudSave() {
+      if (!cloudReady) return;
+      clearTimeout(cloudTimer);
+      cloudTimer = setTimeout(() => { persistCloudChanges().catch(console.error); }, 250);
+    }
+
+    async function cloudUploadBlob(fileRecord) {
+      const path = `${currentAuthUser.id}/${fileRecord.projectId}/${fileRecord.id}`;
+      const { error } = await supabaseClient.storage.from(CLOUD_BUCKET)
+        .upload(path, fileRecord.blob, { contentType: fileRecord.type, upsert: false });
+      if (error) throw error;
+      return path;
+    }
+
+    async function cloudGetBlob(fileMeta) {
+      if (!fileMeta.storagePath) return retrieveFileBlob(fileMeta.id);
+      const { data, error } = await supabaseClient.storage.from(CLOUD_BUCKET)
+        .download(fileMeta.storagePath);
+      if (error) throw error;
+      return data;
+    }
+
+    async function cloudRemoveFile(fileMeta) {
+      if (!fileMeta.storagePath) { await removeFileBlob(fileMeta.id); return; }
+      const { error } = await supabaseClient.storage.from(CLOUD_BUCKET)
+        .remove([fileMeta.storagePath]);
+      if (error) throw error;
+    }
+
+    async function cloudRemoveProjectFiles(project) {
+      for (const file of project.files || []) await cloudRemoveFile(file);
+    }
+
+    // Optional one-time migration from this browser's previously saved projects.
+    // Never silently replace existing cloud projects.
+    async function offerLocalMigration() {
+      const stored = localStorage.getItem(STORAGE_KEY);
+      if (!stored || projects.length) return;
+      let local;
+      try { local = JSON.parse(stored); } catch { return; }
+      if (!Array.isArray(local) || !local.length) return;
+      const ok = window.confirm(`Found ${local.length} locally saved projects for this account. Import them into Supabase now? Your browser copies will remain as backup.`);
+      if (!ok) return;
+      const migrated = [];
+      try {
+        for (const original of local) {
+          const p = structuredClone(original);
+          for (const file of p.files || []) {
+            if (file.storagePath) continue;
+            const blob = await retrieveFileBlob(file.id);
+            if (!blob) { console.warn('Local attachment missing:', file.name); continue; }
+            file.storagePath = await cloudUploadBlob({ ...file, projectId: p.id, blob });
+          }
+          migrated.push(p);
+        }
+        projects = migrated;
+        await persistCloudChanges();
+        showToast('Local projects imported to Supabase.', 'success');
+      } catch (e) {
+        console.error('Migration failed:', e);
+        showToast('Migration incomplete: ' + e.message + '. Browser backup retained.', 'error');
+        projects = await loadProjectsFromCloud();
+        cloudSnapshot = new Map(projects.map(p => [p.id, JSON.stringify(p)]));
+      }
+    }
+
     function setAuthMessage(message, type = 'error') {
       const el = document.getElementById('auth-message');
       el.textContent = message;
@@ -2324,6 +2455,7 @@ async function handleGuestLogin() {
         }
     }
 
+    cloudReady = false;
     currentAuthUser = {
         id: 'guest',
         email: 'Guest Account'
@@ -2363,35 +2495,38 @@ async function handleGuestLogin() {
 }
     
     async function syncAuthSession(session) {
-      // Keep guest mode active when Supabase reports
-    // that no registered user is signed in.
-    if (currentAuthUser?.id === 'guest' && !session?.user) {
-        return;
-    }
+      if (currentAuthUser?.id === 'guest' && !session?.user) return;
       const user = session?.user || null;
       if (!user) {
+        clearTimeout(cloudTimer);
+        cloudReady = false;
         currentAuthUser = null;
         document.body.classList.remove('authenticated');
         projects = [];
         return;
       }
       if (currentAuthUser?.id === user.id && document.body.classList.contains('authenticated')) return;
-
+      cloudReady = false;
       currentAuthUser = user;
-      // Keep this current prototype's browser-local project data separate per signed-in account.
-      // This does NOT sync project data to Supabase or make it available on other devices.
       STORAGE_KEY = 'handoff_hub_projects_v2_' + user.id;
       DB_NAME = 'HandoffHub_FileStore_v1_' + user.id;
       dbPromise = null;
       document.getElementById('auth-user-email').textContent = user.email || 'Signed-in user';
-      document.body.classList.add('authenticated');
-      if (!appInitialized) {
-        appInitialized = true;
-        await initApp();
-      } else {
-        loadProjectsFromStorage();
-        await seedSampleFilesIfNeeded();
-        showView('dashboard');
+      try {
+        projects = await loadProjectsFromCloud();
+        cloudSnapshot = new Map(projects.map(p => [p.id, JSON.stringify(p)]));
+        cloudReady = true;
+        await offerLocalMigration();
+        document.body.classList.add('authenticated');
+        if (!appInitialized) {
+          appInitialized = true;
+          await initApp();
+        } else showView('dashboard');
+      } catch (err) {
+        cloudReady = false;
+        console.error('Cannot load cloud workspace:', err);
+        setAuthMessage('Cannot load cloud projects: ' + err.message + '. Check your Supabase table and RLS policies.');
+        document.body.classList.remove('authenticated');
       }
     }
 
@@ -2403,9 +2538,14 @@ async function handleGuestLogin() {
       window.addEventListener('dragover', (e) => e.preventDefault());
       window.addEventListener('drop', (e) => e.preventDefault());
 
-      loadProjectsFromStorage();
-      await seedSampleFilesIfNeeded();
+      if (!isCloudUser()) {
+        loadProjectsFromStorage();
+        await seedSampleFilesIfNeeded();
+      }
       setupEventListeners();
+      window.addEventListener('focus', () => {
+        if (isCloudUser() && cloudReady) refreshCloudProjects().catch(err => console.warn('Refresh skipped:', err));
+      });
       showView('dashboard');
     }
 
@@ -2442,6 +2582,7 @@ async function handleGuestLogin() {
     }
 
     function saveProjectsToStorage() {
+      if (isCloudUser()) { scheduleCloudSave(); return; }
       try {
         localStorage.setItem(STORAGE_KEY, JSON.stringify(projects));
       } catch (err) {
@@ -3150,9 +3291,7 @@ async function handleGuestLogin() {
             continue;
           }
 
-          const oldId = p.files[existingIdx].id;
-          await removeFileBlob(oldId);
-          p.files.splice(existingIdx, 1);
+          // Remove the previous file only after the replacement uploads successfully.
         }
 
         const fileId = sanitizeId('file_' + Date.now() + '_' + Math.random().toString(36).substring(2, 8));
@@ -3167,8 +3306,16 @@ async function handleGuestLogin() {
         };
 
         try {
-          await storeFileBlob(fileRecord);
+          const storagePath = isCloudUser() ? await cloudUploadBlob(fileRecord) : null;
+          if (!isCloudUser()) await storeFileBlob(fileRecord);
+          if (existingIdx !== -1) {
+            const oldFile = p.files[existingIdx];
+            p.files.splice(existingIdx, 1);
+            try { if (isCloudUser()) await cloudRemoveFile(oldFile); else await removeFileBlob(oldFile.id); }
+            catch (cleanupError) { console.warn('Old file cleanup failed:', cleanupError); }
+          }
           p.files.push({
+            ...(storagePath ? { storagePath } : {}),
             id: fileId,
             name: file.name,
             size: file.size,
@@ -3200,7 +3347,7 @@ async function handleGuestLogin() {
       if (!fileMeta) return;
 
       try {
-        const blob = await retrieveFileBlob(fileId);
+        const blob = isCloudUser() ? await cloudGetBlob(fileMeta) : await retrieveFileBlob(fileId);
         if (!blob) {
           showToast(`File data for "${fileMeta.name}" not found in local IndexedDB. Manifests only include file metadata.`, 'error');
           return;
@@ -3237,7 +3384,8 @@ async function handleGuestLogin() {
       if (!confirmed) return;
 
       try {
-        await removeFileBlob(fileId);
+        if (isCloudUser()) await cloudRemoveFile(fileMeta);
+        else await removeFileBlob(fileId);
         p.files = (p.files || []).filter(f => f.id !== fileId);
         p.updatedAt = new Date().toISOString();
         saveProjectsToStorage();
@@ -3440,6 +3588,7 @@ async function handleGuestLogin() {
     }
 
     async function restoreProjectsArray(incomingList) {
+      if (isCloudUser()) { showToast('Bulk restore is available in Guest Mode only until cloud import conflict handling is added.', 'error'); return; }
       const confirmed = await showConfirmDialog({
         title: 'Import Workspace Backup',
         message: `This will replace your current ${projects.length} workspace projects with ${incomingList.length} imported projects. Continue?`,
@@ -3542,7 +3691,7 @@ async function handleGuestLogin() {
             }
             addedNames.add(fileName.toLowerCase());
 
-            const blob = await retrieveFileBlob(fileMeta.id);
+            const blob = isCloudUser() ? await cloudGetBlob(fileMeta) : await retrieveFileBlob(fileMeta.id);
             if (blob) {
               filesFolder.file(fileName, blob);
             } else {
@@ -3699,7 +3848,10 @@ async function handleGuestLogin() {
 
       if (!confirmed) return;
 
-      await removeFilesForProject(projectId);
+      try {
+        if (isCloudUser()) await cloudRemoveProjectFiles(p);
+        else await removeFilesForProject(projectId);
+      } catch (err) { showToast('Cannot delete project files: ' + err.message, 'error'); return; }
       projects = projects.filter(item => item.id !== projectId);
       saveProjectsToStorage();
       showToast('Project deleted', 'info');
@@ -3865,6 +4017,7 @@ async function handleGuestLogin() {
        Settings Actions: Reset & Clear
        ------------------------------------------------------------- */
     async function reloadSampleDemoData() {
+      if (isCloudUser()) { showToast('Sample reset is available only in Guest Mode.', 'info'); return; }
       const confirmed = await showConfirmDialog({
         title: 'Reload Sample Projects',
         message: 'This will reset your workspace projects back to the initial university CSIE capstone demonstrations.',
@@ -3882,6 +4035,7 @@ async function handleGuestLogin() {
     }
 
     async function confirmClearAllData() {
+      if (isCloudUser()) { showToast('Bulk cloud deletion is disabled. Delete projects individually.', 'info'); return; }
       const confirmed = await showConfirmDialog({
         title: 'Wipe All Local Projects & Files',
         message: 'This will permanently delete all projects from localStorage and all binary blobs from IndexedDB. This cannot be undone.',
